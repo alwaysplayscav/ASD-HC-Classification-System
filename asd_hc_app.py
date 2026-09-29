@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ASD/HC 脑影像分类系统
-功能：读取T1加权脑影像，提取AAL3脑区特征，用SVM分类，输出三次预测结果。
+功能：读取T1加权脑影像，提取AAL3脑区特征，用三种不同模型分类，输出三次预测结果。
 作者：XXX
 日期：2026-XX-XX
 """
@@ -20,6 +20,8 @@ from tkinter import scrolledtext, messagebox
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.metrics import accuracy_score, confusion_matrix
 
@@ -32,7 +34,7 @@ LABEL_FILE = 'train_labels.csv'
 AAL_PATH = 'AAL3/AAL3v1.nii'
 X_TRAIN_FILE = 'X_train.csv'
 X_TEST_FILE = 'X_test.csv'
-MODEL_FILES = ['svm_model_1.pkl', 'svm_model_2.pkl', 'svm_model_3.pkl']
+MODEL_FILES = ['model_1.pkl', 'model_2.pkl', 'model_3.pkl']
 SUBMISSION_FILES = ['submission_1.csv', 'submission_2.csv', 'submission_3.csv']
 N_ROUNDS = 3
 
@@ -42,7 +44,7 @@ class ASDHCApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ASD/HC 脑影像分类系统")
-        self.root.geometry("1020x750")  # 稍微拉大一点窗口，让两边都放得下
+        self.root.geometry("1020x750")
 
         self.msg_queue = queue.Queue()
         self.busy = False
@@ -290,20 +292,33 @@ class ASDHCApp:
         y_train = train_data['label'].values
 
         self.clear_metric()
-        self.clear_prediction()  # 清空旧的预测结果
+        self.clear_prediction()
         self.set_metric(f"训练集样本数：{X_train.shape[0]}，特征维度：{X_train.shape[1]}")
 
         for r in range(N_ROUNDS):
             round_num = r + 1
             rs = round_num * 10
-            self.log(f"---------- 训练第 {round_num} 个模型（随机种子={rs}）----------")
+
+            # 根据轮次选择不同的模型
+            if round_num == 1:
+                clf = SVC(kernel='rbf', class_weight='balanced',
+                          probability=True, random_state=rs)
+                model_name = "SVM"
+            elif round_num == 2:
+                clf = LogisticRegression(class_weight='balanced',
+                                         max_iter=1000, random_state=rs)
+                model_name = "逻辑回归"
+            else:
+                clf = RandomForestClassifier(n_estimators=100,
+                                             class_weight='balanced',
+                                             random_state=rs)
+                model_name = "随机森林"
+
+            self.log(f"---------- 训练第 {round_num} 个模型（{model_name}）----------")
 
             model = Pipeline([
                 ('scaler', StandardScaler()),
-                ('svm', SVC(kernel='rbf',
-                            class_weight='balanced',
-                            probability=True,
-                            random_state=rs))
+                ('clf', clf)
             ])
 
             cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=rs)
@@ -318,10 +333,12 @@ class ASDHCApp:
             self.log(f"  自闭症识别率  : {sensitivity:.4f}")
             self.log(f"  健康人识别率  : {specificity:.4f}")
             self.set_metric(
-                f"第{round_num}次 | ACC={acc:.4f}  Sens={sensitivity:.4f}  Spec={specificity:.4f}")
+                f"第{round_num}次({model_name}) | ACC={acc:.4f}  Sens={sensitivity:.4f}  Spec={specificity:.4f}")
 
+            # 用全部训练集训练最终模型
             model.fit(X_train, y_train)
 
+            # 保存模型
             with open(MODEL_FILES[r], 'wb') as f:
                 pickle.dump(model, f)
             self.log(f"  已保存模型：{MODEL_FILES[r]}")
@@ -346,16 +363,19 @@ class ASDHCApp:
         test_ids = test_data['subject_id'].values
         X_test = test_data.drop('subject_id', axis=1)
 
+        model_names = ['SVM', '逻辑回归', '随机森林']
+
         for r in range(N_ROUNDS):
             round_num = r + 1
-            self.log(f"---------- 使用第 {round_num} 个模型预测 ----------")
+            self.log(f"---------- 使用第 {round_num} 个模型（{model_names[r]}）预测 ----------")
 
             with open(MODEL_FILES[r], 'rb') as f:
                 model = pickle.load(f)
 
             probs = model.predict_proba(X_test)
-            asd_probs = probs[:, 0]
+            asd_probs = probs[:, 0]  # 属于ASD(标签1)的概率
 
+            # 按ASD概率从高到低排序，前5个填1，后5个填2
             sorted_indices = np.argsort(asd_probs)[::-1]
             final_labels = np.ones(len(test_ids), dtype=int)
             final_labels[sorted_indices[5:]] = 2
@@ -367,11 +387,11 @@ class ASDHCApp:
             submission = submission.set_index('subject_id').loc[test_ids].reset_index()
             submission.to_csv(SUBMISSION_FILES[r], index=False)
 
-            # 把预测结果输出到界面右下角
-            self.set_prediction(f"--- 第 {round_num} 次预测结果 ---")
+            # 输出到界面右下角
+            self.set_prediction(f"--- 第 {round_num} 次（{model_names[r]}）---")
             for _, row in submission.iterrows():
                 self.set_prediction(f"{row['subject_id']} -> {row['label']}")
-            self.set_prediction("")  # 空行隔开
+            self.set_prediction("")
 
             self.log(f"  预测结果已保存为 {SUBMISSION_FILES[r]}")
 
